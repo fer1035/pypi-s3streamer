@@ -12,7 +12,7 @@ This BASH wrapper script allows the Python module to run in a parallel manner. W
 *The script is an example of its capabilities, so you can modify it to include other module arguments if necessary*.
 
 Arguments
--------------------------------
+---------
 
 - Position 1: Authorization code
 - Position 2: Target relative path in the S3 bucket

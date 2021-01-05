@@ -1,0 +1,662 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: CDNPurge API main template.
+
+Parameters:
+
+  cftoken:
+    Type: String
+    Description: CloudFlare Access Token
+    ConstraintDescription: The CloudFlare access token for cache purging actions.
+    NoEcho: true
+
+  gitpw:
+    Type: String
+    Description: Git Password
+    ConstraintDescription: The password for the repo in use for this API.
+    NoEcho: true
+
+  cdnpurgeapi:
+    Type: String
+    Default: CDNPurge
+    Description: CDNPurge API Name
+    ConstraintDescription: Will also be the name of the LDS-URL mappings table.
+
+  dbrefreshapi:
+    Type: String
+    Default: DBRefresh
+    Description: DynamoDB Refresh API Name
+    ConstraintDescription: Will also be the name of the backends control table.
+
+  cdnpurgebucket:
+    Type: String
+    Description: Source S3 Bucket
+    ConstraintDescription: The bucket name containing API source materials.
+
+  cdnzip:
+    Type: String
+    Default: cdnpurge/cdnpurge.zip
+    Description: ZIP file for the CDNPurge function.
+
+  dbzip:
+    Type: String
+    Default: cdnpurge/dbrefresh.zip
+    Description: ZIP file for the DBRefresh function.
+
+  requestszip:
+    Type: String
+    Default: cdnpurge/requests.zip
+    Description: ZIP file for the requests layer.
+
+  gitzip:
+    Type: String
+    Default: cdnpurge/gitpython.zip
+    Description: ZIP file for the Git layer.
+
+  tier:
+    Type: String
+    Description: Deployment Tier
+    ConstraintDescription: 'sand, dev, or prod.'
+
+  COGARN:
+    Type: String
+    Description: Cognito User Pool ARN for authorizer.
+
+  COGSCOPE:
+    Type: String
+    Description: Cognito scope for authorizer.
+
+  KEYROLE:
+    Type: String
+    Description: ARN for the role to administer the KMS key.
+  
+  cfdlendpoint:
+    Type: String
+    Default: https://api.cloudflare.com/client/v4/zones/26713a637cea3269cc9fc5e2b2b0be2d/purge_cache
+    Description: CloudFlare endpoint for download.ni.com.
+
+  cfmsendpoint:
+    Type: String
+    Default: https://api.cloudflare.com/client/v4/zones/0de141d4e0d22e421b2dc89c12a36229/purge_cache
+    Description: CloudFlare endpoint for multisim.com.
+  
+  cfniendpoint:
+    Type: String
+    Default: https://api.cloudflare.com/client/v4/zones/484282a800fc0fad15d0f3baa9991827/purge_cache
+    Description: CloudFlare endpoint for ni.com.
+  
+  gitrepo:
+    Type: String
+    Default: dev.azure.com/ni/IT/_git/websystems-api
+    Description: Git repository for API CSV data.
+  
+  mapcsv:
+    Type: String
+    Default: mappings.csv
+    Description: LDS-URL mappings CSV filename.
+
+  becsv:
+    Type: String
+    Default: backends.csv
+    Description: Backend control CSV filename.
+  
+  tmppath:
+    Type: String
+    Default: /tmp/cdnpurge
+    Description: TMP location for the Lambda backend to keep Git files.
+  
+  wslds:
+    Type: String
+    Default: PAM-NI-IT-Infra-Web
+    Description: Web Systems LDS group.
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Source Files
+        Parameters:
+          - cdnpurgebucket
+          - cdnzip
+          - dbzip
+          - requestszip
+          - gitzip
+      - Label:
+          default: API Parameters
+        Parameters:
+          - cdnpurgeapi
+          - dbrefreshapi
+          - tier
+          - tmppath
+          - wslds
+      - Label:
+          default: Secrets Parameters
+        Parameters:
+          - KEYROLE
+          - cftoken
+          - gitpw
+      - Label:
+          default: Cognito Parameters
+        Parameters:
+          - COGARN
+          - COGSCOPE
+      - Label:
+          default: External Parameters
+        Parameters:
+          - cfdlendpoint
+          - cfniendpoint
+          - cfmsendpoint
+          - gitrepo
+          - mapcsv
+          - becsv
+
+Mappings:
+
+  DynamoDBPars:
+    Common:
+      billingmode: PAY_PER_REQUEST
+      keyattribute: id
+      attributetype: S
+      keytype: HASH
+
+  LambdaPars:
+    Common:
+      memorysize: 256
+      runtime: python3.8
+      timeout: 60
+
+Resources:
+
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub '${cdnpurgeapi}-LambdaSecretsReadOnly-${AWS::AccountId}'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'secretsmanager:GetSecretValue'
+                Resource: '*'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSKeyManagementServicePowerUser'
+
+  KMSKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: Token encryption key.
+      Enabled: true
+      EnableKeyRotation: false
+      KeyPolicy:
+        Version: 2012-10-17
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow access for Key Administrators
+            Effect: Allow
+            Principal:
+              AWS: !Sub '${KEYROLE}'
+            Action:
+              - 'kms:Create*'
+              - 'kms:Describe*'
+              - 'kms:Enable*'
+              - 'kms:List*'
+              - 'kms:Put*'
+              - 'kms:Update*'
+              - 'kms:Revoke*'
+              - 'kms:Disable*'
+              - 'kms:Get*'
+              - 'kms:Delete*'
+              - 'kms:TagResource'
+              - 'kms:UntagResource'
+              - 'kms:ScheduleKeyDeletion'
+              - 'kms:CancelKeyDeletion'
+            Resource: '*'
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:sts::${AWS::AccountId}:assumed-role/${LambdaRole}/${cdnpurgeapi}
+                - !Sub arn:aws:sts::${AWS::AccountId}:assumed-role/${LambdaRole}/${dbrefreshapi}
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Resource: '*'
+          - Sid: Allow attachment of persistent resources
+            Effect: Allow
+            Principal:
+              AWS: !Sub '${KEYROLE}'
+            Action:
+              - 'kms:CreateGrant'
+              - 'kms:ListGrants'
+              - 'kms:RevokeGrant'
+            Resource: '*'
+            Condition:
+              Bool:
+                'kms:GrantIsForAWSResource': 'true'
+      KeyUsage: ENCRYPT_DECRYPT
+      PendingWindowInDays: 7
+
+  CFTokenSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Description: CloudFlare token.
+      KmsKeyId: !Sub '${KMSKey}'
+      SecretString: !Sub '${cftoken}'
+    DependsOn:
+      - KMSKey
+
+  GitPWSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Description: Git password.
+      KmsKeyId: !Sub '${KMSKey}'
+      SecretString: !Sub '${gitpw}'
+    DependsOn:
+      - KMSKey
+
+  CDNPurgeDB:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: !FindInMap 
+            - DynamoDBPars
+            - Common
+            - keyattribute
+          AttributeType: !FindInMap 
+            - DynamoDBPars
+            - Common
+            - attributetype
+      BillingMode: !FindInMap 
+        - DynamoDBPars
+        - Common
+        - billingmode
+      KeySchema:
+        - AttributeName: !FindInMap 
+            - DynamoDBPars
+            - Common
+            - keyattribute
+          KeyType: !FindInMap 
+            - DynamoDBPars
+            - Common
+            - keytype
+      SSESpecification:
+        KMSMasterKeyId: !Sub ${KMSKey}
+        SSEEnabled: true
+        SSEType: KMS
+    DependsOn:
+      - KMSKey
+
+  DBRefreshDB:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: !FindInMap 
+            - DynamoDBPars
+            - Common
+            - keyattribute
+          AttributeType: !FindInMap 
+            - DynamoDBPars
+            - Common
+            - attributetype
+      BillingMode: !FindInMap 
+        - DynamoDBPars
+        - Common
+        - billingmode
+      KeySchema:
+        - AttributeName: !FindInMap 
+            - DynamoDBPars
+            - Common
+            - keyattribute
+          KeyType: !FindInMap 
+            - DynamoDBPars
+            - Common
+            - keytype
+      SSESpecification:
+        KMSMasterKeyId: !Sub ${KMSKey}
+        SSEEnabled: true
+        SSEType: KMS
+    DependsOn:
+      - KMSKey
+
+  RequestsLayer:
+    Type: 'AWS::Lambda::LayerVersion'
+    Properties:
+      CompatibleRuntimes:
+        - python3.8
+        - python3.7
+        - python3.6
+      Content:
+        S3Bucket: !Sub ${cdnpurgebucket}
+        S3Key: !Sub '${requestszip}'
+
+  GitLayer:
+    Type: 'AWS::Lambda::LayerVersion'
+    Properties:
+      CompatibleRuntimes:
+        - python3.8
+        - python3.7
+        - python3.6
+      Content:
+        S3Bucket: !Sub ${cdnpurgebucket}
+        S3Key: !Sub '${gitzip}'
+
+  CDNPurgeLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref cdnpurgebucket
+        S3Key: !Sub '${cdnzip}'
+      Environment:
+        Variables:
+          CFTOKENSEC: !Sub '${CFTokenSecret}'
+          KMSID: !Sub '${KMSKey}'
+          CFDLENDPOINT: !Sub ${cfdlendpoint}
+          CFMSENDPOINT: !Sub ${cfmsendpoint}
+          CFNIENDPOINT: !Sub ${cfniendpoint}
+          MAPTABLE: !Sub '${CDNPurgeDB}'
+          BETABLE: !Sub '${DBRefreshDB}'
+          WSLDS: !Sub ${wslds}
+      FunctionName: !Sub '${cdnpurgeapi}'
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Sub '${RequestsLayer}'
+      MemorySize: !FindInMap 
+        - LambdaPars
+        - Common
+        - memorysize
+      Runtime: !FindInMap 
+        - LambdaPars
+        - Common
+        - runtime
+      Timeout: !FindInMap 
+        - LambdaPars
+        - Common
+        - timeout
+      Role: !Sub '${LambdaRole.Arn}'
+
+  DBRefreshLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Sub '${cdnpurgebucket}'
+        S3Key: !Sub '${dbzip}'
+      Environment:
+        Variables:
+          GITPWSEC: !Sub '${GitPWSecret}'
+          KMSID: !Sub '${KMSKey}'
+          GITREPO: !Sub ${gitrepo}
+          MAPCSV: !Sub ${mapcsv}
+          BECSV: !Sub ${becsv}
+          TMPPATH: !Sub ${tmppath}
+          MAPTABLE: !Sub '${CDNPurgeDB}'
+          BETABLE: !Sub '${DBRefreshDB}'
+          WSLDS: !Sub ${wslds}
+      FunctionName: !Ref dbrefreshapi
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Sub '${RequestsLayer}'
+        - !Sub '${GitLayer}'
+        - !Sub 'arn:aws:lambda:${AWS::Region}:553035198032:layer:git-lambda2:4'
+      MemorySize: !FindInMap 
+        - LambdaPars
+        - Common
+        - memorysize
+      Runtime: !FindInMap 
+        - LambdaPars
+        - Common
+        - runtime
+      Timeout: !FindInMap 
+        - LambdaPars
+        - Common
+        - timeout
+      Role: !Sub '${LambdaRole.Arn}'
+
+  CDNPurgeGW:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      ApiKeySourceType: HEADER
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Name: !Sub '${cdnpurgeapi}'
+
+  CDNPurgeGWAuth:
+    Type: 'AWS::ApiGateway::Authorizer'
+    Properties:
+      Name: APIAuthorizer
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !Sub '${COGARN}'
+      RestApiId: !Sub '${CDNPurgeGW}'
+      Type: COGNITO_USER_POOLS
+    DependsOn: CDNPurgeGW
+
+  CDNPurgeGWResRequest:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !Sub '${CDNPurgeGW.RootResourceId}'
+      PathPart: request
+      RestApiId: !Sub '${CDNPurgeGW}'
+    DependsOn:
+      - CDNPurgeGW
+
+  CDNPurgePOSTRequest:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: true
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Sub '${CDNPurgeGWAuth}'
+      AuthorizationScopes:
+        - !Sub '${COGSCOPE}'
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: 200
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CDNPurgeLambdaFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: 'true'
+      ResourceId: !Sub '${CDNPurgeGWResRequest}'
+      RestApiId: !Sub '${CDNPurgeGW}'
+    DependsOn:
+      - CDNPurgeLambdaFunction
+      - CDNPurgeGW
+
+  CDNPurgeOPTIONSRequest:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationHttpMethod: OPTIONS
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+        PassthroughBehavior: WHEN_NO_MATCH
+        Type: MOCK
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": "'true'"
+            "method.response.header.Access-Control-Allow-Methods": "'true'"
+            "method.response.header.Access-Control-Allow-Origin": "'true'"
+      ResourceId: !Sub '${CDNPurgeGWResRequest}'
+      RestApiId: !Sub '${CDNPurgeGW}'
+    DependsOn:
+      - CDNPurgeLambdaFunction
+      - CDNPurgeGWResRequest
+
+  CDNPurgeGWResRefresh:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !Sub '${CDNPurgeGW.RootResourceId}'
+      PathPart: refresh
+      RestApiId: !Sub '${CDNPurgeGW}'
+    DependsOn:
+      - CDNPurgeGW
+
+  CDNPurgePOSTRefresh:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: true
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: 200
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DBRefreshLambdaFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: 'true'
+      ResourceId: !Sub '${CDNPurgeGWResRefresh}'
+      RestApiId: !Sub '${CDNPurgeGW}'
+    DependsOn:
+      - DBRefreshLambdaFunction
+      - CDNPurgeGW
+
+  CDNPurgeOPTIONSRefresh:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationHttpMethod: OPTIONS
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+        PassthroughBehavior: WHEN_NO_MATCH
+        Type: MOCK
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": "'true'"
+            "method.response.header.Access-Control-Allow-Methods": "'true'"
+            "method.response.header.Access-Control-Allow-Origin": "'true'"
+      ResourceId: !Sub '${CDNPurgeGWResRefresh}'
+      RestApiId: !Sub '${CDNPurgeGW}'
+    DependsOn:
+      - DBRefreshLambdaFunction
+      - CDNPurgeGWResRefresh
+
+  CDNPurgePermissionPOSTRequest:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Sub '${CDNPurgeLambdaFunction.Arn}'
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CDNPurgeGW}/*/POST/${cdnpurgeapi}
+    DependsOn:
+      - CDNPurgeLambdaFunction
+      - CDNPurgeGW
+
+  CDNPurgePermissionPOSTRefresh:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Sub '${DBRefreshLambdaFunction.Arn}'
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CDNPurgeGW}/*/POST/${dbrefreshapi}
+    DependsOn:
+      - DBRefreshLambdaFunction
+      - CDNPurgeGW
+
+  CDNPurgeStage:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Sub '${CDNPurgeGW}'
+      StageDescription:
+        ThrottlingBurstLimit: 500
+        ThrottlingRateLimit: 1000
+      StageName: !Sub '${tier}'
+    DependsOn:
+      - CDNPurgePOSTRequest
+      - CDNPurgeOPTIONSRequest
+      - CDNPurgePOSTRefresh
+      - CDNPurgeOPTIONSRefresh
+
+  CDNPurgeKey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    Properties:
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Sub '${CDNPurgeGW}'
+          StageName: !Sub '${tier}'
+    DependsOn:
+      - CDNPurgeStage
+
+  CDNPurgePlan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    Properties:
+      ApiStages:
+        - ApiId: !Sub '${CDNPurgeGW}'
+          Stage: !Sub '${tier}'
+      Quota:
+        Limit: 100000
+        Period: MONTH
+      Throttle:
+        BurstLimit: 500
+        RateLimit: 1000
+    DependsOn:
+      - CDNPurgeGW
+      - CDNPurgeStage
+
+  CDNPurgePlanKey:
+    Type: 'AWS::ApiGateway::UsagePlanKey'
+    Properties:
+      KeyId: !Sub '${CDNPurgeKey}'
+      KeyType: API_KEY
+      UsagePlanId: !Sub '${CDNPurgePlan}'
+    DependsOn:
+      - CDNPurgeKey
+      - CDNPurgePlan
+
+Outputs:
+
+  CDNPurgeEndpoint:
+    Description: API endpoint for CDNPurge.
+    Value: !Sub https://${CDNPurgeGW}.execute-api.${AWS::Region}.amazonaws.com/${tier}/request
+      
+  DBRefreshEndpoint:
+    Description: API endpoint for DBRefresh.
+    Value: !Sub https://${CDNPurgeGW}.execute-api.${AWS::Region}.amazonaws.com/${tier}/refresh

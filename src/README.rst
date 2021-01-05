@@ -143,4 +143,4 @@ Special Note
 
 This module was created to accommodate a very specific need for a very specific organization, hence the multiple component prerequisites. If you're interested to use the full solution, the CloudFormation templates to create the corresponding AWS resources are available in the project repository (customizations may be necessary).
 
-*Current version: 2020.2.2.3 | Built with Poetry*
+*Current version: 2020.2.2.3*

@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "s3streamer"
+version = "2020.2.2.2"
+description = "Stream files to AWS S3 using multipart upload with token-based authentication."
+readme = "README.rst"
+authors = ["Ahmad Ferdaus Abd Razak <ahmad.ferdaus.abd.razak@ni.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.6"
+requests = "^2.25.1"
+
+[tool.poetry.dev-dependencies]
+pytest = "^5.2"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

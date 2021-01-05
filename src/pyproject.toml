@@ -1,9 +1,12 @@
 [tool.poetry]
 name = "s3streamer"
-version = "2020.2.2.2"
+version = "2020.2.2.3"
 description = "Stream files to AWS S3 using multipart upload with token-based authentication."
 readme = "README.rst"
 authors = ["Ahmad Ferdaus Abd Razak <ahmad.ferdaus.abd.razak@ni.com>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/fer1035/pypi-s3streamer"
+keywords = ["S3", "AWS", "API", "multipart", "upload"]
 
 [tool.poetry.dependencies]
 python = "^3.6"

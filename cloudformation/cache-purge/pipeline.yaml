@@ -1,0 +1,17 @@
+---
+# CDNPurge pipeline to refresh DynamoDB
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - master
+
+pool:
+  name: <pool-name>
+
+steps:
+- script: curl -X POST -H "x-api-key:<$DB-Refresh-API-key>" "<https://DB/Refresh.url>"
+  displayName: Refresh URL mappings.
+  env:
+    <DB-Refresh-API-key>: $(<DB-Refresh-API-key-variable>)

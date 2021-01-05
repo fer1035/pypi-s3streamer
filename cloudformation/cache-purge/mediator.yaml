@@ -1,0 +1,377 @@
+---
+    AWSTemplateFormatVersion: 2010-09-09
+    Description: CDNPurge mediator function and API.
+    
+    Parameters:
+
+      ENCODING:
+        Type: String
+        Default: latin-1
+        Description: Character encoding for hashes.
+
+      SALTSECRET:
+        Type: String
+        Description: Flavor additive, needs to be consistent with the authorizer function.
+        NoEcho: true
+
+      EMAIL:
+        Type: String
+        Default: global.web.systems.team@ni.com
+        Description: Dummy email for the moment.
+    
+      SRCBUCKET:
+        Type: String
+        Description: Source S3 bucket.
+      
+      MEDIATORZIP:
+        Type: String
+        Default: cdnpurge/mediator.zip
+        Description: ZIP file for mediator function.
+      
+      REQUESTSZIP:
+        Type: String
+        Default: cdnpurge/requests.zip
+        Description: ZIP file for requests layer.
+      
+      TIER:
+        Type: String
+        Description: Deployment tier.
+      
+      AUTHAPISECRET:
+        Type: String
+        Description: API key for the authorization function.
+        NoEcho: true
+    
+      MAINAPISECRET:
+        Type: String
+        Description: API key for the main function
+        NoEcho: true
+      
+      APINAME:
+        Type: String
+        Description: API name in API Gateway.
+      
+      AUTHURL:
+        Type: String
+        Description: URL for authorization API to verify and grant tokens.
+      
+      MAINURL:
+        Type: String
+        Description: URL for the main function.
+      
+      KEYROLE:
+        Type: String
+        Description: The role allowed to administer the KMS key.
+        ConstraintDescription: Must be a valid IAM role in this account (preferrably the deploying user).
+    
+      MEDIATOR:
+        Type: String
+        Default: CDNPurgeMediator
+        Description: Mediator Lambda function name
+    
+    Metadata: 
+      AWS::CloudFormation::Interface: 
+        ParameterGroups: 
+          - 
+            Label: 
+              default: S3 Parameters
+            Parameters: 
+              - SRCBUCKET
+              - MEDIATORZIP
+              - REQUESTSZIP
+          - 
+            Label: 
+              default: API Parameters
+            Parameters:
+              - ENCODING
+              - APINAME
+              - TIER
+              - AUTHURL
+              - MAINURL
+              - MEDIATOR
+              - EMAIL
+          -
+            Label:
+              default: KMS Parameters
+            Parameters:
+              - KEYROLE
+          -
+            Label:
+              default: Secrets Parameters
+            Parameters:
+              - AUTHAPISECRET
+              - MAINAPISECRET
+              - SALTSECRET
+    
+    Mappings:
+          
+      Lambda:
+        common:
+          memorysize: 256
+          runtime: python3.8
+          timeout: 60
+    
+    Resources:
+      
+      LambdaRole:
+        Type: 'AWS::IAM::Role'
+        Properties:
+          AssumeRolePolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service:
+                    - lambda.amazonaws.com
+                Action:
+                  - sts:AssumeRole
+          Policies:
+            - PolicyName: !Sub ${MEDIATOR}-LambdaSecretsReadOnly-${AWS::AccountId}
+              PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                  - Effect: Allow
+                    Action: secretsmanager:GetSecretValue
+                    Resource: '*'
+          ManagedPolicyArns:
+            - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+            - 'arn:aws:iam::aws:policy/AWSKeyManagementServicePowerUser'
+      
+      KMSKey:
+        Type: AWS::KMS::Key
+        Properties: 
+          Description: Token encryption key.
+          Enabled: true
+          EnableKeyRotation: false
+          KeyPolicy:
+            Version: '2012-10-17'
+            Statement:
+            - Sid: Enable IAM User Permissions
+              Effect: Allow
+              Principal:
+                AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+              Action: kms:*
+              Resource: "*"
+            - Sid: Allow access for Key Administrators
+              Effect: Allow
+              Principal:
+                AWS: !Sub ${KEYROLE}
+              Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+              Resource: "*"
+            - Sid: Allow use of the key
+              Effect: Allow
+              Principal:
+                AWS:
+                - !Sub arn:aws:sts::${AWS::AccountId}:assumed-role/${LambdaRole}/${MEDIATOR}
+              Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+              Resource: "*"
+            - Sid: Allow attachment of persistent resources
+              Effect: Allow
+              Principal:
+                AWS: !Sub ${KEYROLE}
+              Action:
+              - kms:CreateRequest
+              - kms:ListRequests
+              - kms:RevokeRequest
+              Resource: "*"
+              Condition:
+                Bool:
+                  kms:RequestIsForAWSResource: 'true'
+          KeyUsage: ENCRYPT_DECRYPT
+          PendingWindowInDays: 7
+    
+      SaltSecret:
+        Type: AWS::SecretsManager::Secret
+        Properties: 
+            Description: Flavor additive.
+            KmsKeyId: !Sub ${KMSKey}
+            SecretString: !Sub ${SALTSECRET}
+        DependsOn:
+            - KMSKey
+    
+      AuthAPISecret:
+        Type: AWS::SecretsManager::Secret
+        Properties: 
+          Description: Key for the authorization API.
+          KmsKeyId: !Sub ${KMSKey}
+          SecretString: !Sub ${AUTHAPISECRET}
+        DependsOn:
+          - KMSKey
+      
+      MainAPISecret:
+        Type: AWS::SecretsManager::Secret
+        Properties: 
+          Description: Key for the main API.
+          KmsKeyId: !Sub ${KMSKey}
+          SecretString: !Sub ${MAINAPISECRET}
+        DependsOn:
+          - KMSKey
+      
+      RequestsLayer:
+        Type: 'AWS::Lambda::LayerVersion'
+        Properties:
+          CompatibleRuntimes:
+            - python3.8
+            - python3.7
+            - python3.6
+          Content:
+            S3Bucket: !Sub ${SRCBUCKET}
+            S3Key: !Sub ${REQUESTSZIP}
+    
+      Mediator:
+        Type: 'AWS::Lambda::Function'
+        Properties:
+          FunctionName: !Sub ${MEDIATOR}
+          Code:
+            S3Bucket: !Sub ${SRCBUCKET}
+            S3Key: !Sub ${MEDIATORZIP}
+          Environment:
+            Variables:
+              ENCODING: !Sub ${ENCODING}
+              EMAIL: !Sub ${EMAIL}
+              AUTHURL: !Sub ${AUTHURL}
+              MAINURL: !Sub ${MAINURL}
+              KMSID: !Sub ${KMSKey}
+              AUTHAPISECRET: !Sub ${AuthAPISecret}
+              MAINAPISECRET: !Sub ${MainAPISecret}
+              SALTSECRET: !Sub ${SaltSecret}
+          Handler: lambda_function.lambda_handler
+          Layers:
+            - !Sub ${RequestsLayer}
+          MemorySize: !FindInMap 
+            - Lambda
+            - common
+            - memorysize
+          Runtime: !FindInMap 
+            - Lambda
+            - common
+            - runtime
+          Timeout: !FindInMap 
+            - Lambda
+            - common
+            - timeout
+          Role: !Sub ${LambdaRole.Arn}
+        DependsOn:
+          - LambdaRole
+          - KMSKey
+    
+      FunctionGW:
+        Type: 'AWS::ApiGateway::RestApi'
+        Properties:
+          Name: !Sub ${APINAME}
+          ApiKeySourceType: HEADER
+          EndpointConfiguration:
+            Types:
+              - REGIONAL
+    
+      FunctionGWResRequest:
+        Type: 'AWS::ApiGateway::Resource'
+        Properties:
+          ParentId: !Sub ${FunctionGW.RootResourceId}
+          PathPart: request
+          RestApiId: !Sub ${FunctionGW}
+        DependsOn:
+          - FunctionGW
+      
+      FunctionGWPOSTRequest:
+        Type: 'AWS::ApiGateway::Method'
+        Properties:
+          ApiKeyRequired: false
+          AuthorizationType: NONE
+          HttpMethod: POST
+          Integration:
+            IntegrationHttpMethod: POST
+            IntegrationResponses:
+              - StatusCode: 200
+            Type: AWS_PROXY
+            Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Mediator.Arn}/invocations
+          MethodResponses:
+            - StatusCode: 200
+              ResponseModels:
+                application/json: Empty
+              ResponseParameters:
+                method.response.header.Access-Control-Allow-Origin: 'true'
+          ResourceId: !Sub ${FunctionGWResRequest}
+          RestApiId: !Sub ${FunctionGW}
+        DependsOn:
+          - Mediator
+          - FunctionGWResRequest
+      
+      FunctionGWOPTIONSRequest:
+        Type: 'AWS::ApiGateway::Method'
+        Properties:
+          ApiKeyRequired: false
+          AuthorizationType: NONE
+          HttpMethod: OPTIONS
+          Integration:
+            IntegrationHttpMethod: OPTIONS
+            IntegrationResponses:
+              - StatusCode: 200
+                ResponseParameters:
+                  "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                  "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+                  "method.response.header.Access-Control-Allow-Origin": "'*'"
+            PassthroughBehavior: WHEN_NO_MATCH
+            Type: MOCK
+          MethodResponses:
+            - StatusCode: 200
+              ResponseModels:
+                application/json: Empty
+              ResponseParameters:
+                "method.response.header.Access-Control-Allow-Headers": "true"
+                "method.response.header.Access-Control-Allow-Methods": "true"
+                "method.response.header.Access-Control-Allow-Origin": "true"
+          ResourceId: !Sub ${FunctionGWResRequest}
+          RestApiId: !Sub ${FunctionGW}
+        DependsOn:
+          - Mediator
+          - FunctionGWResRequest
+    
+      FunctionGWPermissionPOSTRequest:
+        Type: 'AWS::Lambda::Permission'
+        Properties:
+          FunctionName: !Sub ${Mediator.Arn}
+          Action: 'lambda:InvokeFunction'
+          Principal: apigateway.amazonaws.com
+          SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FunctionGW}/*/POST/request
+        DependsOn:
+          - Mediator
+          - FunctionGWPOSTRequest
+    
+      FunctionGWStage:
+        Type: 'AWS::ApiGateway::Deployment'
+        Properties:
+          RestApiId: !Sub ${FunctionGW}
+          StageDescription:
+            ThrottlingBurstLimit: 500
+            ThrottlingRateLimit: 1000
+          StageName: !Sub ${TIER}
+        DependsOn:
+          - FunctionGWPOSTRequest
+          - FunctionGWOPTIONSRequest
+      
+    Outputs:
+    
+      RequestEndpoint:
+        Description: API endpoint for the mediator function.
+        Value: !Sub https://${FunctionGW}.execute-api.${AWS::Region}.amazonaws.com/${TIER}/request
+    

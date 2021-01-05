@@ -1,0 +1,604 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Auth layer Lambda functions and APIs.
+
+Parameters:
+
+  SRCBUCKET:
+    Type: String
+    Description: Source S3 bucket.
+  
+  AUTHENTICATORZIP:
+    Type: String
+    Description: ZIP file for Authenticator function.
+  
+  AUTHORIZERZIP:
+    Type: String
+    Description: ZIP file for Authorizer function.
+  
+  JOSEZIP:
+    Type: String
+    Description: ZIP file for Jose layer.
+  
+  TIER:
+    Type: String
+    Description: Deployment tier.
+
+  POOLID:
+    Type: String
+    Description: Cognito User Pool ID.
+  
+  CLIENTID:
+    Type: String
+    Description: Cognito Client ID.
+
+  CALLBACK:
+    Type: String
+    Description: Cognito callback URL.
+    ConstraintDescription: Must be HTTPS.
+  
+  SECRET:
+    Type: String
+    Description: Cognito encoded secret.
+    NoEcho: true
+  
+  TOKENURL:
+    Type: String
+    Description: Cognito token URL.
+  
+  APINAME:
+    Type: String
+    Description: API name in API Gateway.
+  
+  CONDIMENTS:
+    Type: String
+    Description: Flavor additive.
+    NoEcho: true
+  
+  SNSTOPIC:
+    Type: String
+    Default: AuthTokenCreation
+    Description: SNS topic for token creation notification.
+
+  ENCODING:
+    Type: String
+    Default: latin-1
+    Description: Character encoding for encryption and decryption purposes.
+    ConstraintDescription: Standard values are 'latin-1' and 'utf-8'.
+  
+  KEYROLE:
+    Type: String
+    Description: The role allowed to administer the KMS key.
+    ConstraintDescription: Must be a valid IAM role in this account (preferrably the deploying user).
+  
+  AUTHENTICATOR:
+    Type: String
+    Default: Authenticator
+    Description: Authenticator Lambda function name
+
+  AUTHORIZER:
+    Type: String
+    Default: Authorizer
+    Description: Authorizer Lambda function name
+
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: Source Files
+        Parameters: 
+          - SRCBUCKET
+          - AUTHENTICATORZIP
+          - AUTHORIZERZIP
+          - JOSEZIP
+      - 
+        Label: 
+          default: API Parameters
+        Parameters:
+          - APINAME
+          - TIER
+          - ENCODING
+          - CONDIMENTS
+          - SNSTOPIC
+          - AUTHENTICATOR
+          - AUTHORIZER
+      -
+        Label:
+          default: KMS Parameters
+        Parameters:
+          - KEYROLE
+      -
+        Label:
+          default: Cognito Parameters
+        Parameters:
+          - POOLID
+          - CLIENTID
+          - CALLBACK
+          - SECRET
+          - TOKENURL
+
+Mappings:
+      
+  AuthLambda:
+    common:
+      memorysize: 128
+      runtime: python3.8
+      timeout: 3
+
+Resources:
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+  
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub AuthLambdaSNSPublish-${AWS::AccountId}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Sub ${SNSTopic}
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: '*'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AWSKeyManagementServicePowerUser'
+    DependsOn:
+      - SNSTopic
+  
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: Token encryption key.
+      Enabled: true
+      EnableKeyRotation: false
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: Enable IAM User Permissions
+          Effect: Allow
+          Principal:
+            AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+          Action: kms:*
+          Resource: "*"
+        - Sid: Allow access for Key Administrators
+          Effect: Allow
+          Principal:
+            AWS: !Sub ${KEYROLE}
+          Action:
+          - kms:Create*
+          - kms:Describe*
+          - kms:Enable*
+          - kms:List*
+          - kms:Put*
+          - kms:Update*
+          - kms:Revoke*
+          - kms:Disable*
+          - kms:Get*
+          - kms:Delete*
+          - kms:TagResource
+          - kms:UntagResource
+          - kms:ScheduleKeyDeletion
+          - kms:CancelKeyDeletion
+          Resource: "*"
+        - Sid: Allow use of the key
+          Effect: Allow
+          Principal:
+            AWS:
+            - !Sub arn:aws:sts::${AWS::AccountId}:assumed-role/${LambdaRole}/${AUTHENTICATOR}
+            - !Sub arn:aws:sts::${AWS::AccountId}:assumed-role/${LambdaRole}/${AUTHORIZER}
+          Action:
+          - kms:Encrypt
+          - kms:Decrypt
+          - kms:ReEncrypt*
+          - kms:GenerateDataKey*
+          - kms:DescribeKey
+          Resource: "*"
+        - Sid: Allow attachment of persistent resources
+          Effect: Allow
+          Principal:
+            AWS: !Sub ${KEYROLE}
+          Action:
+          - kms:CreateGrant
+          - kms:ListGrants
+          - kms:RevokeGrant
+          Resource: "*"
+          Condition:
+            Bool:
+              kms:GrantIsForAWSResource: 'true'
+      KeyUsage: ENCRYPT_DECRYPT
+      PendingWindowInDays: 7
+  
+  AuthSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties: 
+      Description: Cognito authorization secret.
+      KmsKeyId: !Sub ${KMSKey}
+      SecretString: !Sub ${SECRET}
+    DependsOn:
+      - KMSKey
+    
+  SaltSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties: 
+      Description: Lambda salt secret.
+      KmsKeyId: !Sub ${KMSKey}
+      SecretString: !Sub ${CONDIMENTS}
+    DependsOn:
+      - KMSKey
+  
+  AuthDB:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: code
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: code
+          KeyType: HASH
+      SSESpecification:
+        KMSMasterKeyId: !Sub ${KMSKey}
+        SSEEnabled: true
+        SSEType: KMS
+    DependsOn:
+      - KMSKey
+
+  JoseLayer:
+    Type: 'AWS::Lambda::LayerVersion'
+    Properties:
+      CompatibleRuntimes:
+        - python3.8
+        - python3.7
+        - python3.6
+      Content:
+        S3Bucket: !Sub ${SRCBUCKET}
+        S3Key: !Sub ${JOSEZIP}
+        
+  Authenticator:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub ${AUTHENTICATOR}
+      Code:
+        S3Bucket: !Sub ${SRCBUCKET}
+        S3Key: !Sub ${AUTHENTICATORZIP}
+      Environment:
+        Variables:
+          ENCODING: !Sub ${ENCODING}
+          POOLID: !Sub ${POOLID}
+          CLIENTID: !Sub ${CLIENTID}
+          CALLBACK: !Sub ${CALLBACK}
+          KEYURL: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${POOLID}/.well-known/jwks.json
+          TOKENURL: !Sub ${TOKENURL}
+          AUTHSECRET: !Sub ${AuthSecret}
+          SALTSECRET: !Sub ${SaltSecret}
+          DBTABLE: !Sub ${AuthDB}
+          KMSID: !Sub ${KMSKey}
+          SNSTOPIC: !Sub ${SNSTopic}
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Sub ${JoseLayer}
+      MemorySize: !FindInMap 
+        - AuthLambda
+        - common
+        - memorysize
+      Role: !Sub ${LambdaRole.Arn}
+      Runtime: !FindInMap 
+        - AuthLambda
+        - common
+        - runtime
+      Timeout: !FindInMap 
+        - AuthLambda
+        - common
+        - timeout
+    DependsOn:
+      - LambdaRole
+      - AuthSecret
+      - SaltSecret
+
+  Authorizer:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub ${AUTHORIZER}
+      Code:
+        S3Bucket: !Sub ${SRCBUCKET}
+        S3Key: !Sub ${AUTHORIZERZIP}
+      Environment:
+        Variables:
+          ENCODING: !Sub ${ENCODING}
+          POOLID: !Sub ${POOLID}
+          CLIENTID: !Sub ${CLIENTID}
+          CALLBACK: !Sub ${CALLBACK}
+          KEYURL: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${POOLID}/.well-known/jwks.json
+          TOKENURL: !Sub ${TOKENURL}
+          AUTHSECRET: !Sub ${AuthSecret}
+          SALTSECRET: !Sub ${SaltSecret}
+          DBTABLE: !Sub ${AuthDB}
+          KMSID: !Sub ${KMSKey}
+      Handler: lambda_function.lambda_handler
+      Layers:
+        - !Sub ${JoseLayer}
+      MemorySize: !FindInMap 
+        - AuthLambda
+        - common
+        - memorysize
+      Role: !Sub ${LambdaRole.Arn}
+      Runtime: !FindInMap 
+        - AuthLambda
+        - common
+        - runtime
+      Timeout: !FindInMap 
+        - AuthLambda
+        - common
+        - timeout
+    DependsOn:
+      - LambdaRole
+      - AuthSecret
+      - SaltSecret
+
+  AuthGW:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: !Sub ${APINAME}
+      ApiKeySourceType: HEADER
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  AuthGWResGrant:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !Sub ${AuthGW.RootResourceId}
+      PathPart: grant
+      RestApiId: !Sub ${AuthGW}
+    DependsOn:
+      - AuthGW
+  
+  AuthGWGETGrant:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: 200
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Authenticator.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: 'true'
+      ResourceId: !Sub ${AuthGWResGrant}
+      RestApiId: !Sub ${AuthGW}
+    DependsOn:
+      - Authenticator
+      - AuthGWResGrant
+  
+  AuthGWPOSTGrant:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: 200
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Authenticator.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: 'true'
+      ResourceId: !Sub ${AuthGWResGrant}
+      RestApiId: !Sub ${AuthGW}
+    DependsOn:
+      - Authenticator
+      - AuthGWResGrant
+  
+  AuthGWOPTIONSGrant:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationHttpMethod: OPTIONS
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              "method.response.header.Access-Control-Allow-Methods": "'GET,POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+        PassthroughBehavior: WHEN_NO_MATCH
+        Type: MOCK
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": "'true'"
+            "method.response.header.Access-Control-Allow-Methods": "'true'"
+            "method.response.header.Access-Control-Allow-Origin": "'true'"
+      ResourceId: !Sub ${AuthGWResGrant}
+      RestApiId: !Sub ${AuthGW}
+    DependsOn:
+      - Authenticator
+      - AuthGWResGrant
+
+  AuthGWPermissionGETGrant:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Sub ${Authenticator.Arn}
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AuthGW}/*/GET/grant
+    DependsOn:
+      - Authenticator
+      - AuthGWGETGrant
+  
+  AuthGWPermissionPOSTGrant:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Sub ${Authenticator.Arn}
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AuthGW}/*/POST/grant
+    DependsOn:
+      - Authenticator
+      - AuthGWPOSTGrant
+    
+  AuthGWResRetrieve:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !Sub ${AuthGW.RootResourceId}
+      PathPart: retrieve
+      RestApiId: !Sub ${AuthGW}
+    DependsOn:
+      - AuthGW
+  
+  AuthGWGETRetrieve:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: true
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: 200
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Authorizer.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: 'true'
+      ResourceId: !Sub ${AuthGWResRetrieve}
+      RestApiId: !Sub ${AuthGW}
+    DependsOn:
+      - Authorizer
+      - AuthGWResRetrieve
+
+  AuthGWOPTIONSRetrieve:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationHttpMethod: OPTIONS
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              "method.response.header.Access-Control-Allow-Methods": "'GET,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": "'*'"
+        PassthroughBehavior: WHEN_NO_MATCH
+        Type: MOCK
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": "'true'"
+            "method.response.header.Access-Control-Allow-Methods": "'true'"
+            "method.response.header.Access-Control-Allow-Origin": "'true'"
+      ResourceId: !Sub ${AuthGWResRetrieve}
+      RestApiId: !Sub ${AuthGW}
+    DependsOn:
+      - Authorizer
+      - AuthGWResRetrieve
+
+  AuthGWPermissionGETRetrieve:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Sub ${Authorizer.Arn}
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${AuthGW}/*/GET/retrieve
+    DependsOn:
+      - Authorizer
+      - AuthGWGETRetrieve
+
+  AuthGWStage:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Sub ${AuthGW}
+      StageDescription:
+        ThrottlingBurstLimit: 500
+        ThrottlingRateLimit: 1000
+      StageName: !Sub ${TIER}
+    DependsOn:
+      - AuthGWGETGrant
+      - AuthGWPOSTGrant
+      - AuthGWOPTIONSGrant
+      - AuthGWGETRetrieve
+      - AuthGWOPTIONSRetrieve
+
+  AuthGWKey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    Properties:
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Sub ${AuthGW}
+          StageName: !Sub ${TIER}
+    DependsOn:
+      - AuthGWStage
+
+  AuthGWPlan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    Properties:
+      ApiStages:
+        - ApiId: !Sub ${AuthGW}
+          Stage: !Sub ${TIER}
+      Quota:
+        Limit: 100000
+        Period: MONTH
+      Throttle:
+        BurstLimit: 500
+        RateLimit: 1000
+    DependsOn:
+      - AuthGWStage
+
+  AuthGWPlanKey:
+    Type: 'AWS::ApiGateway::UsagePlanKey'
+    Properties:
+      KeyId: !Sub ${AuthGWKey}
+      KeyType: API_KEY
+      UsagePlanId: !Sub ${AuthGWPlan}
+    DependsOn:
+      - AuthGWKey
+      - AuthGWPlan
+  
+Outputs:
+
+  GrantEndpoint:
+    Description: API endpoint for Authenticator.
+    Value: !Sub https://${AuthGW}.execute-api.${AWS::Region}.amazonaws.com/${TIER}/grant
+
+  RetrieveEndpoint:
+    Description: API endpoint for Authorizer.
+    Value: !Sub https://${AuthGW}.execute-api.${AWS::Region}.amazonaws.com/${TIER}/retrieve

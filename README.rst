@@ -117,6 +117,10 @@ If the upload is successful, the file will be available at http://target.domain/
 Changelog
 ---------
 
+2020.2.2.3
+
+- Added link to project repository.
+
 2020.2.2.2
 
 - Updated HTTP method for geturl action.
@@ -137,6 +141,6 @@ Changelog
 Special Note
 ------------
 
-This module was created to accommodate a very specific need for a very specific organization, hence the multiple component prerequisites. If you're interested to use the full solution, the CloudFormation templates to create the corresponding AWS resources can be made available.
+This module was created to accommodate a very specific need for a very specific organization, hence the multiple component prerequisites. If you're interested to use the full solution, the CloudFormation templates to create the corresponding AWS resources are available in the project repository (customizations may be necessary).
 
-*Current version: 2020.2.2.2 | Built using Poetry*
+*Current version: 2020.2.2.3 | Built with Poetry*

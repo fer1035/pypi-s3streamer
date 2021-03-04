@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "s3streamer"
-version = "2020.2.2.3"
+version = "2021.2.4.0"
 description = "Stream files to AWS S3 using multipart upload with token-based authentication."
 readme = "README.rst"
 authors = ["Ahmad Ferdaus Abd Razak <ahmad.ferdaus.abd.razak@ni.com>"]

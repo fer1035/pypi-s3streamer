@@ -1,0 +1,311 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Uploader function and API.
+
+Parameters:
+
+  SRCBUCKET:
+    Type: String
+    Description: Source S3 bucket.
+  
+  LAMBDAZIP:
+    Type: String
+    Default: s3streamer.zip
+    Description: ZIP file for the Lambda function.
+  
+  IDSECRET:
+    Type: String
+    Default: ABC123
+    Description: Access Key ID for the destination bucket write permission. Update after creating credentials.
+    NoEcho: true
+
+  SECSECRET:
+    Type: String
+    Default: ABC123
+    Description: Secret Access Key for the destination bucket write permission. Update after creating credentials.
+    NoEcho: true
+  
+  APINAME:
+    Type: String
+    Default: s3streamer
+    Description: API name in API Gateway.
+  
+  UPLOADPATH:
+    Type: String
+    Default: upload
+    Description: API endpoint path.
+  
+  URLEXPIRY:
+    Type: Number
+    Default: 3600
+    Description: Expiration time (in seconds) for pre-signed URLs.
+  
+  CORS:
+    Type: String
+    Description: Value for Access-Control-Allow-Origin header. Use "*" (without quotes) for generic use, or specify domains for better security.
+
+Mappings:
+      
+  APIGW:
+    common:
+      burst: 500
+      rate: 1000
+      quota: 100000
+      period: MONTH
+  
+  Lambda:
+    common:
+      memorysize: 256
+      runtime: python3.8
+      timeout: 60
+
+Resources:
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      PublicAccessBlockConfiguration: 
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  
+  User:
+    Type: 'AWS::IAM::User'
+  
+  UserPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Users:
+        - !Sub ${User}
+      PolicyName: !Sub ${User}-Policy-${AWS::AccountId}
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectAcl
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:GetBucketAcl
+            Resource:
+              - !Sub arn:aws:s3:::${S3Bucket}/*
+              - !Sub arn:aws:s3:::${S3Bucket}
+    DependsOn:
+      - S3Bucket
+      - User
+  
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Sub ${SRCBUCKET}
+        S3Key: !Sub ${LAMBDAZIP}
+      Environment:
+        Variables:
+          REGION: !Sub ${AWS::Region}
+          BUCKET: !Sub ${S3Bucket}
+          IDSECRET: !Sub ${IDSECRET}
+          SECSECRET: !Sub ${SECSECRET}
+          URLEXPIRY: !Sub ${URLEXPIRY}
+          CORS: !Sub ${CORS}
+      Handler: lambda_function.lambda_handler
+      MemorySize: !FindInMap 
+        - Lambda
+        - common
+        - memorysize
+      Runtime: !FindInMap 
+        - Lambda
+        - common
+        - runtime
+      Timeout: !FindInMap 
+        - Lambda
+        - common
+        - timeout
+      Role: !Sub ${LambdaRole.Arn}
+    DependsOn:
+      - S3Bucket
+      - LambdaRole
+
+  FunctionGW:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: !Sub ${APINAME}
+      ApiKeySourceType: HEADER
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+    DependsOn: LambdaFunction
+  
+  FunctionGWRes:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !Sub ${FunctionGW.RootResourceId}
+      PathPart: !Sub ${UPLOADPATH}
+      RestApiId: !Sub ${FunctionGW}
+    DependsOn:
+      - FunctionGW
+  
+  FunctionGWPOST:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: true
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        IntegrationResponses:
+          - StatusCode: 200
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: 'true'
+      ResourceId: !Sub ${FunctionGWRes}
+      RestApiId: !Sub ${FunctionGW}
+    DependsOn:
+      - LambdaFunction
+      - FunctionGWRes
+  
+  FunctionGWPermissionPOST:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !Sub ${LambdaFunction.Arn}
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FunctionGW}/*/POST/${UPLOADPATH}
+    DependsOn:
+      - LambdaFunction
+      - FunctionGWPOST
+
+  FunctionGWOPTIONS:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationHttpMethod: OPTIONS
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              "method.response.header.Access-Control-Allow-Methods": "'POST,OPTIONS'"
+              "method.response.header.Access-Control-Allow-Origin": !Sub "'${CORS}'"
+        PassthroughBehavior: WHEN_NO_MATCH # WHEN_NO_TEMPLATES, WHEN_NO_MATCH, NEVER
+        RequestTemplates:
+          "application/json": "{\"statusCode\": 200}"
+        Type: MOCK
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+          ResponseParameters:
+            "method.response.header.Access-Control-Allow-Headers": "'true'"
+            "method.response.header.Access-Control-Allow-Methods": "'true'"
+            "method.response.header.Access-Control-Allow-Origin": "'true'"
+      ResourceId: !Sub ${FunctionGWRes}
+      RestApiId: !Sub ${FunctionGW}
+    DependsOn:
+      - LambdaFunction
+      - FunctionGWRes
+
+  FunctionGWStage:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Sub ${FunctionGW}
+      StageDescription:
+        ThrottlingBurstLimit: !FindInMap 
+          - APIGW
+          - common
+          - burst
+        ThrottlingRateLimit: !FindInMap 
+          - APIGW
+          - common
+          - rate
+      StageName: !Sub ${APINAME}
+    DependsOn:
+      - FunctionGWPOST
+      - FunctionGWOPTIONS
+
+  FunctionGWKey:
+    Type: 'AWS::ApiGateway::ApiKey'
+    Properties:
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Sub ${FunctionGW}
+          StageName: !Sub ${APINAME}
+    DependsOn:
+      - FunctionGWStage
+
+  FunctionGWPlan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    Properties:
+      ApiStages:
+        - ApiId: !Sub ${FunctionGW}
+          Stage: !Sub ${APINAME}
+      Quota:
+        Limit: !FindInMap 
+          - APIGW
+          - common
+          - quota
+        Period: !FindInMap 
+          - APIGW
+          - common
+          - period
+      Throttle:
+        BurstLimit: !FindInMap 
+          - APIGW
+          - common
+          - burst
+        RateLimit: !FindInMap 
+          - APIGW
+          - common
+          - rate
+    DependsOn:
+      - FunctionGWStage
+
+  FunctionGWPlanKey:
+    Type: 'AWS::ApiGateway::UsagePlanKey'
+    Properties:
+      KeyId: !Sub ${FunctionGWKey}
+      KeyType: API_KEY
+      UsagePlanId: !Sub ${FunctionGWPlan}
+    DependsOn:
+      - FunctionGWKey
+      - FunctionGWPlan
+  
+Outputs:
+
+  MainEndpoint:
+    Description: Lambda function. Go there to obtain API key and endpoint URL.
+    Value: !Sub ${LambdaFunction}
+  
+  BucketName:
+    Description: Upload destination bucket name.
+    Value: !Sub ${S3Bucket}
+  
+  Uploader:
+    Description: IAM user with write access to the destination bucket.
+    Value: !Sub ${User}

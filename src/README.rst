@@ -5,7 +5,7 @@
 Overview
 --------
 
-A frontend module to upload files to AWS S3 storage. The module supports large files as it chunks them into smaller sizes and recombines them into the original file in the specified S3 bucket. The module employs multiprocessing, and there is the option of specifying the size of each chunk as well as how many chunks to send in a single run. The defaults are listed in **Optional Arguments** below.
+A frontend module to upload files to AWS S3 storage. The module supports large files as it chunks them into smaller sizes and recombines them into the original file in the specified S3 bucket. It employs multiprocessing, and there is the option of specifying the size of each chunk as well as how many chunks to send in a single run. The defaults are listed in **Optional Arguments** below.
 
 Prerequisites
 -------------
@@ -84,14 +84,18 @@ If the upload is successful, the file will be available at **installer/images/my
 Changelog
 ---------
 
+2021.2.4.1
+
+- Updated README.
+
 2021.2.4.0
 
 - Simplified the module and backend to use as few assumptions as possible.
 - Removed authentication and authorization layer.
 - Removed CloudFront.
 - Removed S3 path verification; default is now the root path.
-- Removed overwrite flag; overwrites existing objects by default is already exists.
-- Once-step backend deployment (plus credentials creation and stack update).
+- Removed overwrite flag; overwrites existing objects by default if already exists.
+- One-step backend deployment (plus credentials creation and stack update).
 - Cleaned-up module to replace most printouts with returns.
 
 2021.2.3.2
@@ -129,4 +133,4 @@ Changelog
 
 - Initial release of the finalized working module.
 
-*Current version: 2021.2.4.0*
+*Current version: 2021.2.4.1*

@@ -84,6 +84,10 @@ If the upload is successful, the file will be available at **installer/images/my
 Changelog
 ---------
 
+2021.2.4.2
+
+- Moved build and publish process to GitHub Actions.
+
 2021.2.4.1
 
 - Updated README.
@@ -133,4 +137,4 @@ Changelog
 
 - Initial release of the finalized working module.
 
-*Current version: 2021.2.4.1*
+*Current version: 2021.2.4.2*

@@ -239,19 +239,17 @@ def multipart(fileloc, path = '', parts = 5, partsize = 100, tmp = '/tmp', purge
                     manifestls.extend(results)
                     if {'status': 'failed'} in manifestls:
                         raise Exception('Failed to complete upload.')
-                    namels.clear()
             results = poolit(parts, namels)
             manifestls.extend(results)
             if {'status': 'failed'} in manifestls:
                 raise Exception('Failed to complete upload.')
-            namels.clear()
         # Finalize if everything is good.
         try:
             # Create manifest lists for recombination and teporary file deletion.
             try:
                 manifest = [{'ETag': i['ETag'], 'PartNumber': i['PartNumber']} for i in manifestls]
                 manifestdel = [{'Key': i['Key']} for i in manifestls]
-            except :
+            except:
                 # Abort multipart upload upon failure to clean storage from rogue Upload ID.
                 preresponse = abortit(requrl, reqapikey, filename, path, uploadid)
                 try:
